@@ -1,23 +1,27 @@
-import subprocess
 import os
-import shutil
-import wfdb
+import subprocess
 import matplotlib.pyplot as plt
 import numpy as np
+import shutil
+import wfdb
 from scipy.ndimage import zoom
 from scipy.signal import savgol_filter, resample
+from preprocess import normalize, qsPeaks
 import torch
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
 
 root_path = "/home/nahuel/ecg/generalization/"
+SEED = 42
 
 class PhysioNetDataset():
     def __init__(self, dataset, path : str = False, download : bool = False, use_numpy: bool = True):
         self.path = path
         self.download = download
         self.use_numpy = use_numpy
-        self.lead = 0
+        self.lead = -1
+        self.num_classes = -1
+        self.class_counts = -1
 
         if dataset == "MIT-BIH":
             url = "https://physionet.org/files/mitdb/1.0.0/"
@@ -87,7 +91,6 @@ class PhysioNetDataset():
                 # Calculate the number of samples for the target frequency
                 num_samples = int(len(signal) * target_fs / record.fs)
                 signal = resample(signal, num_samples)
-            signal = np.array([resample(signal, int(len(sample) * 409.6 / 1000))/ 1000 for sample in samples_10]) # Resample to 400 Hz and convert to 1e-4V
             # Smooth the signal
             signal = savgol_filter(signal, window_length=20, polyorder=2) # windows length dependerá del dataset
             # Normalize signal
@@ -143,8 +146,30 @@ class PhysioNetDataset():
             seg_labels.append(seg_labels_classified)
 
         # Convert to numpy arrays
-        self.X = np.concatenate(seg_values[1:]) # Skip the first element because the tpeak is wrong
-        self.y = np.concatenate(seg_labels[1:])
+        X = np.concatenate(seg_values[1:]) # Skip the first element because the tpeak is wrong
+        y = np.concatenate(seg_labels[1:])
+
+        # Check samples per class and remove classes with less than 200 samples
+        unique, counts = np.unique(y, return_counts=True)
+        for label, count in zip(unique, counts):
+            if count < 200:
+                X = X[y != label]
+                y = y[y != label]
+
+        # Check if the majority class is not more than 3 times the second most frequent class
+        sorted_counts = sorted(counts, reverse=True)
+        if len(sorted_counts) > 1 and sorted_counts[0] > 3 * sorted_counts[1]:
+            # Remove samples from the majority class to balance the dataset
+            np.random.seed(SEED)
+            majority_class = unique[np.argmax(counts)]
+            indices_to_remove = np.random.choice(np.where(y == majority_class)[0], size=int(sorted_counts[0] - 3 * sorted_counts[1]), replace=False)
+            X = np.delete(X, indices_to_remove, axis=0)
+            y = np.delete(y, indices_to_remove)
+
+        self.X = X
+        self.y = y
+        self.num_classes = len(np.unique(y))
+        self.class_counts = np.unique(y, return_counts=True)[1]
 
     def __getitem__(self, idx, pre_process=False):
         record = wfdb.rdrecord(self.path + "/" + self.files[idx])
@@ -225,130 +250,6 @@ def plot_info(data, num_samples=5):
             axs[i, j].set_title(f"Class {label}, Sample {j+1}")
     plt.tight_layout()
     plt.show()
-    
-def onoffset(interval, mode):
-    """
-    Function calculates on/off set of QRS complex.
-    
-    :param interval: The ECG signal interval
-    :param mode: Mode either 'on' for onset or 'off' for offset
-    :return: ind - the index of the onset or offset
-    """
-    slope = []
-    
-    # Calculate the slope of the interval
-    for i in range(1, len(interval) - 1):
-        slope.append(interval[i + 1] - interval[i - 1])
-    
-    # Using MIN_SLOPE to determine onset placement
-    if mode == 'on':
-        ind = np.argmin(np.abs(slope))
-    elif mode == 'off':
-        slope_th = 0.2 * np.max(np.abs(slope))
-        slope_s = np.where(np.abs(slope) >= slope_th)[0]
-        ind = slope_s[0] if len(slope_s) > 0 else -1  # Return -1 if no slope_s is found
-    else:
-        raise ValueError("Invalid mode, please select 'on' or 'off'")
-    
-    return ind
-
-def qsPeaks(ECG, Rposition, fs):
-    """
-    Q, S peaks detection.
-    
-    :param ECG: The ECG signal
-    :param Rposition: Positions of R-peaks
-    :param fs: Sampling frequency
-    :return: ECGpeaks (detected Q, S, P, T peaks)
-    """
-    # Average heart beat length
-    aveHB = len(ECG) / len(Rposition)
-    
-    # Initialize an array to store the fiducial points
-    fid_pks = np.zeros((len(Rposition), 7), dtype=int)
-    # fiducial points: P wave onset, Q wave onset, R wave peak, 
-    # S wave onset, T wave onset, R wave offset, T wave offset
-    
-    # Set up the search windows (in samples)
-    windowS = round(fs * 0.1)
-    windowQ = round(fs * 0.05)
-    windowP = round(aveHB / 3)
-    windowT = round(aveHB * 2 / 3)
-    windowOF = round(fs * 0.04)
-    
-    # Process each R-position
-    for i in range(len(Rposition)):
-        thisR = Rposition[i]
-        
-        # First
-        if i == 0:
-            fid_pks[i, 3] = thisR
-            fid_pks[i, 5] = thisR + windowS
-        # Last
-        elif i == len(Rposition) - 1:
-            fid_pks[i, 3] = thisR
-            fid_pks[i, 1] = thisR - windowQ
-        else:
-            if (thisR + windowT) < len(ECG) and (thisR - windowP) >= 1:
-                # Detect Q and S peaks
-                fid_pks[i, 3] = thisR
-                Sp = np.argmin(ECG[thisR:thisR + windowS])
-                thisS = Sp + thisR
-                fid_pks[i, 4] = thisS
-                Qp = np.argmin(ECG[thisR - windowQ:thisR])
-                thisQ = thisR - (windowQ + 1) + Qp
-                fid_pks[i, 2] = thisQ
-                
-                # Detect QRS onset and offset
-                interval_q = ECG[thisQ - windowOF:thisQ]
-                thisON = thisQ - (windowOF + 1) + onoffset(interval_q, 'on')
-                
-                interval_s = ECG[thisS:thisS + windowOF]
-                thisOFF = thisS + onoffset(interval_s, 'off') - 1
-                
-                fid_pks[i, 1] = thisON
-                fid_pks[i, 5] = thisOFF
-    
-    # Detect P and T waves
-    for i in range(1, len(Rposition) - 1):
-        lastOFF = fid_pks[i - 1, 5]
-        thisON = fid_pks[i, 1]
-        thisOFF = fid_pks[i, 5]
-        nextON = fid_pks[i + 1, 1]
-        
-        if thisON > lastOFF and thisOFF < nextON:
-
-            
-            Tzone = ECG[thisOFF:int(nextON - round((nextON - thisOFF) / 3))]
-            Pzone = ECG[lastOFF + int(round(2 * (thisON - lastOFF) / 3)):thisON]
-
-            try:
-                thisT = np.argmax(Tzone)
-                thisP = np.argmax(Pzone)
-            except Exception as e:
-                print("Error in Tzone or Pzone:", e)
-                continue
-            
-            fid_pks[i, 0] = lastOFF + round(2 * (thisON - lastOFF) / 3) + thisP - 1
-            fid_pks[i, 6] = thisOFF + thisT - 1
-    
-    # Filter out invalid peaks (those with 0 value)
-    #ECGpeaks = []
-    #for i in range(len(Rposition)):
-        #if np.prod(fid_pks[i, :]) != 0:
-    #    ECGpeaks.append(fid_pks[i, :])
-    
-    return np.array(fid_pks) #np.array(ECGpeaks)
-
-def normalize(signal, min_val=-5, max_val=5):
-    """
-    Function to normalize the ECG signal.
-    
-    :param signal: The ECG signal
-    :return: Normalized ECG signal
-    """
-    signal = (signal - min_val) / (max_val - min_val)
-    return signal
 
 def load_data(dataset, batch_size=32):
     """
@@ -358,28 +259,35 @@ def load_data(dataset, batch_size=32):
     :return: The train, validation, and test dataloaders.
     """
 
+    class_counts = None
+
     if dataset == "MIT-toy":
         # Load the MIT-toy dataset
         df_train = pd.read_csv(root_path+"data/MIT-toy/mitbih_train.csv", header=None)
         df_test = pd.read_csv(root_path+"data/MIT-toy/mitbih_test.csv", header=None)
         # Convert pandas dataframes to tensors for training and testing
         train_dataset = TensorDataset(torch.tensor(df_train.values[:,:-1].astype(np.float32)), torch.tensor(df_train.values[:,-1].astype(np.int64)))
-        test_dataloader = DataLoader(TensorDataset(torch.tensor(df_test.values[:,:-1].astype(np.float32)), torch.tensor(df_test.values[:,-1].astype(np.int64))), batch_size=batch_size, shuffle=False)
+        class_counts = np.unique(df_train.values[:,-1], return_counts=True)[1].astype(np.float32)
+        test_dataloader = DataLoader(TensorDataset(torch.tensor(df_test.values[:,:-1].astype(np.float32)), torch.tensor(df_test.values[:,-1].astype(np.int64))), batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED))
     else:
         # Load other datasets using PhysioNetDataset
         train_dataset = PhysioNetDataset(dataset, path=root_path+'data/'+dataset)
         # Split the dataset into training and testing sets
-        train_dataset, test_dataset = torch.utils.data.random_split(train_dataset, [0.8, 0.2], generator=torch.Generator().manual_seed(42))
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+        train_dataset, test_dataset = torch.utils.data.random_split(train_dataset, [0.8, 0.2], generator=torch.Generator().manual_seed(SEED))
+        class_counts = train_dataset.class_counts.astype(np.float32)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED))
 
-    train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [0.9, 0.1])
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [0.9, 0.1], generator=torch.Generator().manual_seed(SEED))
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, generator=torch.Generator().manual_seed(SEED))
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED))
 
-    return train_dataloader, val_dataloader, test_dataloader
+    return train_dataloader, val_dataloader, test_dataloader, class_counts
 
 def get_shot(dataset, shot, num_classes):
+    # Set a random seed for reproducibility
+    np.random.seed(SEED)
     from torch.utils.data import Subset
+
     # Obtén todas las etiquetas
     all_labels = np.array([label for _, label in dataset])
 
@@ -396,6 +304,6 @@ def get_shot(dataset, shot, num_classes):
     subset = Subset(dataset, selected_indices)
 
     # Crea el dataloader
-    dataloader = DataLoader(subset, batch_size=shot, shuffle=True)
+    dataloader = DataLoader(subset, batch_size=shot, shuffle=True, generator=torch.Generator().manual_seed(SEED))
 
     return dataloader

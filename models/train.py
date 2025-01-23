@@ -17,19 +17,26 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 root_path = "/home/nahuel/ecg/generalization/"
 
-def main(dataset_name, model_name, path):
+def main(dataset_name, model_name, path, use_class_weights=None):
 
     print("Training model with dataset:", dataset_name, "and model:", model_name)
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     # Load data
     batch_size = 32
-    train_dataloader, val_dataloader, test_dataloader = load_data(dataset_name, batch_size)
+    train_dataloader, val_dataloader, test_dataloader, class_counts = load_data(dataset_name, batch_size)
+    if use_class_weights and class_counts is not None:
+        class_weights = 1.0 / class_counts
+        class_weights = class_weights / class_weights.sum()
+        class_weights = torch.tensor(class_weights)
+        # move to the same device as the model
+        class_weights = class_weights.to(device)
 
     # Load model
     model_module = select_model(model_name)
-    model = ECGModel(model_module) # Already has configured optimizer and scheduler
+    model = ECGModel(model_module, class_weights) # Already has configured optimizer and scheduler
 
-    device = "gpu" if torch.cuda.is_available() else "cpu"
 
     early_stopping = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=False, mode="min")
     checkpoint = ModelCheckpoint(monitor="val_loss",

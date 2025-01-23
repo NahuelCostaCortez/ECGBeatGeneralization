@@ -5,9 +5,10 @@ import cnn
 from seq2seq import ConvLSTMSeq2Seq
 
 class ECGModel(LightningModule):
-    def __init__(self, model):
+    def __init__(self, model, class_weights=None):
         super().__init__()
         self.model = model
+        self.class_weights = class_weights
 
     def forward(self, x):
         x = x.unsqueeze(1) # To convert (batch, time) to (batch, channels, time)
@@ -16,7 +17,10 @@ class ECGModel(LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         output = self(x)
-        loss = torch.nn.functional.cross_entropy(output, y)
+        if self.class_weights is not None:
+            loss = torch.nn.functional.cross_entropy(output, y, weight=self.class_weights)
+        else:
+            loss = torch.nn.functional.cross_entropy(output, y)
         acc = (output.argmax(dim=1) == y).float().mean()
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         self.log('train_acc', acc, on_step=False, on_epoch=True)
