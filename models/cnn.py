@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 class CNN(nn.Module):
     def __init__(self, n_classes=5):
@@ -43,6 +44,9 @@ class CNN(nn.Module):
         x shape should be (batch_size, 1, 187) in PyTorch 
         since it's (batch, channels, length).
         """
+
+        x = x.unsqueeze(1) # To convert (batch, time) to (batch, channels, time)
+
         # Block 1
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
@@ -80,6 +84,50 @@ class CNN(nn.Module):
         # But if you want to replicate the exact Keras output, you can do:
         #x = self.softmax(x)
         return x
+    
+    def configure_optimizers(self, learning_rate=1e-3):
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+        scheduler = {
+            'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5),
+            'monitor': 'val_loss',  # Métrica a monitorear
+            'interval': 'epoch',    # El programador se actualiza cada época
+            'frequency': 1          # Se actualiza cada vez que se cumple el intervalo
+        }
+        return [optimizer], [scheduler]
+    
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        output = self(x, y)
+        if self.class_weights is not None:
+            loss = torch.nn.functional.cross_entropy(output, y, weight=self.class_weights)
+        else:
+            loss = torch.nn.functional.cross_entropy(output, y)
+        acc = (output.argmax(dim=1) == y).float().mean()
+        self.log('train_loss', loss, on_step=False, on_epoch=True)
+        self.log('train_acc', acc, on_step=False, on_epoch=True)
+        return loss, acc
+    
+    def evaluate(self, test_dataloader, device):
+        import numpy as np
+        from sklearn.metrics import f1_score, accuracy_score
+        from sklearn.metrics import classification_report
+        self.eval()
+        all_preds = []
+        all_targets = []
+        with torch.no_grad():
+            for inputs, targets in test_dataloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = self(inputs)
+                preds = torch.argmax(outputs, dim=1)
+                all_preds.append(preds.cpu().numpy())
+                all_targets.append(targets.cpu().numpy())
+        all_preds = np.concatenate(all_preds)
+        all_targets = np.concatenate(all_targets)
+        f1 = f1_score(all_targets, all_preds, average="macro")
+        acc = accuracy_score(all_targets, all_preds)
+        print(f"Accuracy: {acc:.4f}")
+        print(f"F1 Score: {f1:.4f}")
+        print(classification_report(all_targets, all_preds))
     
 
 def freeze_layers(model):

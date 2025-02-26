@@ -5,19 +5,19 @@ import torch.nn.functional as F
 class ConvLSTMSeq2Seq(nn.Module):
     def __init__(
         self,
-        char2numY,
+        n_classes,
         n_channels=10,
         input_depth=280,
         num_units=128,
         max_time=10,
-        bidirectional=False,
+        bidirectional=True,
         embed_size=10
     ):
         """
         Parámetros:
         -----------
-        char2numY: dict
-            Diccionario de caracteres a índices para la salida.
+        n_classes: dict
+            Número de clases.
         n_channels: int
             Número de canales en la entrada para la parte convolucional.
         input_depth: int
@@ -33,8 +33,7 @@ class ConvLSTMSeq2Seq(nn.Module):
         """
 
         super(ConvLSTMSeq2Seq, self).__init__()
-        self.char2numY = char2numY
-        self.vocab_size = len(char2numY)
+        self.num_classes = n_classes
         self.n_channels = n_channels
         self.input_depth = input_depth
         self.num_units = num_units
@@ -80,7 +79,7 @@ class ConvLSTMSeq2Seq(nn.Module):
         #   - conv3 => se mantiene en ~7
         #   => 128 canales * 7 = 896
         # Ajusta según el cálculo exacto final del padding/stride.
-        encoder_input_size = 128 * 7  # Ajusta a tus cálculos exactos
+        encoder_input_size = 128 * 8  # Ajusta a tus cálculos exactos
         self.encoder_lstm = nn.LSTM(
             input_size=encoder_input_size,
             hidden_size=num_units,
@@ -92,7 +91,7 @@ class ConvLSTMSeq2Seq(nn.Module):
         # DECODER
         # -----------
         # Embedding para la entrada del decoder
-        self.dec_embedding = nn.Embedding(num_embeddings=self.vocab_size,
+        self.dec_embedding = nn.Embedding(num_embeddings=self.num_classes+1,
                                           embedding_dim=embed_size)
 
         # Si el encoder es bidireccional, el estado oculto tendrá 2*num_units
@@ -106,10 +105,10 @@ class ConvLSTMSeq2Seq(nn.Module):
         )
 
         # Capa final de proyección a la dimensión de vocabulario
-        self.fc = nn.Linear(decoder_hidden_size, self.vocab_size)
+        self.fc = nn.Linear(decoder_hidden_size, self.num_classes)
 
 
-    def forward(self, inputs, dec_inputs):
+    def forward(self, inputs, dec_inputs, training=True):
         """
         Parámetros:
         -----------
@@ -120,13 +119,13 @@ class ConvLSTMSeq2Seq(nn.Module):
 
         Retorna:
         --------
-        logits: Torch tensor de forma (batch, y_seq_length, vocab_size)
+        logits: Torch tensor de forma (batch, y_seq_length, num_classes)
             Salida final de proyección de la LSTM decoder.
         """
 
         batch_size = inputs.size(0)
 
-        # 1) REFORMA/RESHAPE para pasar a conv1d
+        # 1) RESHAPE para pasar a conv1d
         #    TF: tf.reshape(inputs, [-1, n_channels, input_depth/n_channels])
         #    => (batch*max_time, n_channels, 28) en el ejemplo
         x = inputs.view(-1, self.n_channels, self.input_depth // self.n_channels)
@@ -141,7 +140,7 @@ class ConvLSTMSeq2Seq(nn.Module):
         x = F.relu(self.conv3(x))   # (batch*max_time, 128, ~7)
 
         # 3) REFORMA para (batch, max_time, -1)
-        #   => primero: (batch*max_time, 128 * 7)
+        #   => (batch*max_time=320, 128 * 8=1024)
         x = x.view(-1, x.size(1) * x.size(2))
         #   => ahora: (batch, max_time, 128 * 7)
         x = x.view(batch_size, self.max_time, -1)
@@ -153,6 +152,8 @@ class ConvLSTMSeq2Seq(nn.Module):
 
         # 5) PREPARAR ENTRADA AL DECODER: Embedding de dec_inputs
         #    dec_inputs: (batch, y_seq_length)
+        if training:
+            dec_inputs = dec_inputs[:,:-1] # Ignore the last token to fit the decoder input
         dec_embed = self.dec_embedding(dec_inputs)  # (batch, y_seq_length, embed_size)
 
         # 6) ESTADO INICIAL DEL DECODER
@@ -165,12 +166,107 @@ class ConvLSTMSeq2Seq(nn.Module):
             h_enc_bidir = torch.cat((h_enc[0], h_enc[1]), dim=1).unsqueeze(0)
             c_enc_bidir = torch.cat((c_enc[0], c_enc[1]), dim=1).unsqueeze(0)
             # out_dec: (batch, y_seq_length, decoder_hidden_size)
+            #print("dec input:", dec_inputs.shape)
+            #print("dec embed:", dec_embed.shape)
             out_dec, _ = self.decoder_lstm(dec_embed, (h_enc_bidir, c_enc_bidir))
         else:
             out_dec, _ = self.decoder_lstm(dec_embed, (h_enc, c_enc))
 
         # 7) CAPA FULLY CONNECTED (logits)
         #    out_dec: (batch, y_seq_length, decoder_hidden_size)
-        logits = self.fc(out_dec)  # (batch, y_seq_length, vocab_size)
+        logits = self.fc(out_dec)  # (batch, y_seq_length, num_classes)
 
         return logits
+    
+    def configure_optimizers(self, learning_rate=1e-3):
+        optimizer = torch.optim.RMSprop(self.parameters(), lr=learning_rate)
+        return [optimizer], [] # No scheduler for now
+    
+    def training_step(self, logits, y):
+        y = y[:,1:] # Ignore the first token ON
+        criterion = nn.CrossEntropyLoss(reduction='mean')
+        # Reshape para que CrossEntropyLoss funcione con [N, C], donde
+        # N = batch_size * seq_length, C = num_classes
+        logits_flat = logits.view(-1, self.num_classes)      # [batch_size*seq_length, num_classes]
+        targets_flat = y.contiguous().view(-1)               # [batch_size*seq_length]
+
+        # Pérdida base (entropía cruzada)
+        loss_ce = criterion(logits_flat, targets_flat) # Escalar (float)
+
+        # === Agregar regularización L2 (similar a tf.nn.l2_loss) ===
+        # tf.nn.l2_loss(v) = sum(v^2) / 2. Por consistencia, se multiplica luego por beta.
+        l2_reg = 0.0
+        for name, param in self.named_parameters():
+            # Omitir bias
+            if 'bias' not in name:
+                l2_reg += 0.5 * torch.sum(param**2)
+
+        beta = 0.001
+        loss = loss_ce + beta * l2_reg
+        acc = (logits.argmax(dim=2) == y).float().mean()
+        return loss, acc
+    
+    def fine_tune(self, train_dataloader, num_epochs=10):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.to(device)  # Mover el modelo al dispositivo correcto
+        optimizers, _ = self.configure_optimizers()
+        optimizer = optimizers[0]  # Obtener el optimizador
+        
+        for epoch in range(num_epochs):
+            self.train()
+            running_loss = 0.0
+            running_acc = 0.0
+            
+            for batch in train_dataloader:
+                inputs, targets = batch
+                inputs, targets = inputs.to(device), targets.to(device)
+                
+                optimizer.zero_grad()  # Resetear gradientes
+                
+                logits = self(inputs, targets)
+                loss, acc = self.training_step(logits, targets)
+                
+                loss.backward()  # Calcular gradientes
+                optimizer.step()  # Actualizar pesos
+                
+                running_loss += loss.item()
+                running_acc += acc.item()
+            
+            avg_loss = running_loss / len(train_dataloader)
+            avg_acc = running_acc / len(train_dataloader)
+            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}, Acc: {avg_acc:.4f}")
+    
+    def evaluate(self, test_dataloader, device="cpu"):
+        import numpy as np
+        from sklearn.metrics import f1_score, accuracy_score
+        from sklearn.metrics import classification_report
+        self.to(device)
+        self.eval()
+        acc = []
+        all_preds = []
+        all_targets = []
+        with torch.no_grad():
+            for inputs, targets in test_dataloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+
+                dec_input = torch.zeros((len(inputs), 1), dtype=torch.long) + torch.unique(targets)[-1] # ON
+                for _ in range(10):
+                    outputs = self(inputs, dec_input, training=False)
+                    prediction = outputs[:, -1].argmax(dim=-1)
+                    dec_input = torch.cat([dec_input, prediction[:, None]], dim=1)
+
+                acc.append(dec_input[:, 1:] == targets) # full sequence because targets don't have ON in test
+                y_true = targets.flatten()
+                y_pred = dec_input[:, 1:].flatten()
+                all_preds.append(y_pred)
+                all_targets.append(y_true)
+            
+        acc = np.concatenate(acc).mean()
+        print(f"Accuracy own: {acc:.4f}")
+        all_preds = np.concatenate(all_preds)
+        all_targets = np.concatenate(all_targets)
+        f1 = f1_score(all_targets, all_preds, average="macro")
+        acc = accuracy_score(all_targets, all_preds)
+        print(f"Accuracy: {acc:.4f}")
+        print(f"F1 Score: {f1:.4f}")
+        print(classification_report(all_targets, all_preds))

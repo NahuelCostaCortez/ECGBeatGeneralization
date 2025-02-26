@@ -1,57 +1,58 @@
 import torch
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from lightning import LightningModule
 import cnn
 from seq2seq import ConvLSTMSeq2Seq
 
 class ECGModel(LightningModule):
-    def __init__(self, model, class_weights=None):
+    def __init__(self, model, class_weights=None, lr=1e-3):
         super().__init__()
         self.model = model
         self.class_weights = class_weights
+        self.lr = lr
 
     def forward(self, x):
-        x = x.unsqueeze(1) # To convert (batch, time) to (batch, channels, time)
-        return self.model(x)
+        x, y = x
+        return self.model(x, y)
     
     def training_step(self, batch, batch_idx):
         x, y = batch
-        output = self(x)
-        if self.class_weights is not None:
-            loss = torch.nn.functional.cross_entropy(output, y, weight=self.class_weights)
-        else:
-            loss = torch.nn.functional.cross_entropy(output, y)
-        acc = (output.argmax(dim=1) == y).float().mean()
+        logits = self((x,y))
+        loss, acc = self.model.training_step(logits, y)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         self.log('train_acc', acc, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        output = self(x)
-        loss = torch.nn.functional.cross_entropy(output, y)
-        acc = (output.argmax(dim=1) == y).float().mean()
+        logits = self((x,y))
+        loss, acc = self.model.training_step(logits, y)
         self.log('val_loss', loss, on_step=False, on_epoch=True)
         self.log('val_acc', acc, on_step=False, on_epoch=True)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        scheduler = {
-            'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10),
-            'monitor': 'val_loss',  # Métrica a monitorear
-            'interval': 'epoch',    # El programador se actualiza cada época
-            'frequency': 1          # Se actualiza cada vez que se cumple el intervalo
-        }
-        return [optimizer], [scheduler]
+        return self.model.configure_optimizers(learning_rate=1e-3)
     
-def select_model(name, n_classes=5):
+    def evaluate(self, test_dataloader, device):
+        self.model.evaluate(test_dataloader, device)
+
+    def fine_tune(self, train_dataloader, num_epochs=10):
+        self.model.fine_tune(train_dataloader, num_epochs)
+    
+def select_model(name, n_classes=5, segment_size=280, num_units=128, max_time=10, bidirectional=True, embed_size=10):
     if name == "CNN":
         model = cnn.CNN(n_classes=n_classes)
     elif name == "Seq2Seq":
-        model = ConvLSTMSeq2Seq(char2numY=..., n_channels=..., input_depth=..., num_units=..., max_time=..., bidirectional=..., embed_size=...)
+        model = ConvLSTMSeq2Seq(n_classes=n_classes, 
+                                n_channels=10, 
+                                input_depth=segment_size, 
+                                num_units=num_units, 
+                                max_time=max_time, 
+                                bidirectional=bidirectional, 
+                                embed_size=embed_size)
     return model
 
+'''
 def fine_tune(model_name, model, train_dataloader, num_epochs=10):
 
     if model_name == "CNN":
@@ -76,7 +77,7 @@ def fine_tune(model_name, model, train_dataloader, num_epochs=10):
             inputs, labels = inputs.to(device), labels.to(device)
             
             # Paso 1: Forward
-            outputs = model(inputs)
+            outputs = model((inputs, labels))
             loss = criterion(outputs, labels)
             
             # Paso 2: Backward
@@ -89,22 +90,5 @@ def fine_tune(model_name, model, train_dataloader, num_epochs=10):
         # Imprimir el progreso
         print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_dataloader):.4f}")
 
-def evaluate(model, test_dataloader, device):
-    import numpy as np
-    from sklearn.metrics import f1_score, accuracy_score
-    model.eval()
-    all_preds = []
-    all_targets = []
-    with torch.no_grad():
-        for inputs, targets in test_dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            preds = torch.argmax(outputs, dim=1)
-            all_preds.append(preds.cpu().numpy())
-            all_targets.append(targets.cpu().numpy())
-    all_preds = np.concatenate(all_preds)
-    all_targets = np.concatenate(all_targets)
-    f1 = f1_score(all_targets, all_preds, average="macro")
-    acc = accuracy_score(all_targets, all_preds)
-    print(f"Accuracy: {acc:.4f}")
-    print(f"F1 Score: {f1:.4f}")
+    return model
+'''

@@ -35,43 +35,48 @@ def qsPeaks(ECG, Rposition, fs):
     :param fs: Sampling frequency
     :return: ECGpeaks (detected Q, S, P, T peaks)
     """
+
     # Average heart beat length
     aveHB = len(ECG) / len(Rposition)
-    
-    # Initialize an array to store the fiducial points
-    fid_pks = np.zeros((len(Rposition), 7), dtype=int)
-    # fiducial points: P wave onset, Q wave onset, R wave peak, 
-    # S wave onset, T wave onset, R wave offset, T wave offset
-    
-    # Set up the search windows (in samples)
+
+    # Cambiar la inicialización de fid_pks a un diccionario
+    fid_pks = {
+        'R_peak': np.zeros(len(Rposition), dtype=int),
+        'Q_peak': np.zeros(len(Rposition), dtype=int),
+        'S_peak': np.zeros(len(Rposition), dtype=int),
+        'onset': np.zeros(len(Rposition), dtype=int),
+        'offset': np.zeros(len(Rposition), dtype=int),
+        'P_peak': np.zeros(len(Rposition), dtype=int),
+        'T_peak': np.zeros(len(Rposition), dtype=int)
+    }
+
     windowS = round(fs * 0.1)
     windowQ = round(fs * 0.05)
     windowP = round(aveHB / 3)
     windowT = round(aveHB * 2 / 3)
     windowOF = round(fs * 0.04)
-    
-    # Process each R-position
+
     for i in range(len(Rposition)):
         thisR = Rposition[i]
         
         # First
         if i == 0:
-            fid_pks[i, 3] = thisR
-            fid_pks[i, 5] = thisR + windowS
+            fid_pks['R_peak'][i] = thisR
+            fid_pks['offset'][i] = thisR + windowS
         # Last
         elif i == len(Rposition) - 1:
-            fid_pks[i, 3] = thisR
-            fid_pks[i, 1] = thisR - windowQ
+            fid_pks['R_peak'][i] = thisR
+            fid_pks['onset'][i] = thisR - windowQ
         else:
             if (thisR + windowT) < len(ECG) and (thisR - windowP) >= 1:
                 # Detect Q and S peaks
-                fid_pks[i, 3] = thisR
+                fid_pks['R_peak'][i] = thisR
                 Sp = np.argmin(ECG[thisR:thisR + windowS])
                 thisS = Sp + thisR
-                fid_pks[i, 4] = thisS
+                fid_pks['S_peak'][i] = thisS
                 Qp = np.argmin(ECG[thisR - windowQ:thisR])
                 thisQ = thisR - (windowQ + 1) + Qp
-                fid_pks[i, 2] = thisQ
+                fid_pks['Q_peak'][i] = thisQ
                 
                 # Detect QRS onset and offset
                 interval_q = ECG[thisQ - windowOF:thisQ]
@@ -80,19 +85,18 @@ def qsPeaks(ECG, Rposition, fs):
                 interval_s = ECG[thisS:thisS + windowOF]
                 thisOFF = thisS + onoffset(interval_s, 'off') - 1
                 
-                fid_pks[i, 1] = thisON
-                fid_pks[i, 5] = thisOFF
-    
+                fid_pks['onset'][i] = thisON
+                fid_pks['offset'][i] = thisOFF
+
     # Detect P and T waves
     for i in range(1, len(Rposition) - 1):
-        lastOFF = fid_pks[i - 1, 5]
-        thisON = fid_pks[i, 1]
-        thisOFF = fid_pks[i, 5]
-        nextON = fid_pks[i + 1, 1]
+        lastOFF = fid_pks['offset'][i-1]
+        thisON = fid_pks['onset'][i]
+        thisOFF = fid_pks['offset'][i]
+        nextON = fid_pks['onset'][i + 1]
         
         if thisON > lastOFF and thisOFF < nextON:
 
-            
             Tzone = ECG[thisOFF:int(nextON - round((nextON - thisOFF) / 3))]
             Pzone = ECG[lastOFF + int(round(2 * (thisON - lastOFF) / 3)):thisON]
 
@@ -103,23 +107,26 @@ def qsPeaks(ECG, Rposition, fs):
                 print("Error in Tzone or Pzone:", e)
                 continue
             
-            fid_pks[i, 0] = lastOFF + round(2 * (thisON - lastOFF) / 3) + thisP - 1
-            fid_pks[i, 6] = thisOFF + thisT - 1
-    
-    # Filter out invalid peaks (those with 0 value)
-    #ECGpeaks = []
-    #for i in range(len(Rposition)):
-        #if np.prod(fid_pks[i, :]) != 0:
-    #    ECGpeaks.append(fid_pks[i, :])
-    
-    return np.array(fid_pks) #np.array(ECGpeaks)
+            fid_pks['P_peak'][i] = lastOFF + round(2 * (thisON - lastOFF) / 3) + thisP - 1
+            fid_pks['T_peak'][i] = thisOFF + thisT - 1
 
-def normalize(signal, min_val=-5, max_val=5):
+    return fid_pks
+
+def normalize(data, min_val=0, max_val=1):
     """
-    Function to normalize the ECG signal.
+    Function to normalize the ECG signal to range [0,1].
     
-    :param signal: The ECG signal
-    :return: Normalized ECG signal
+    :param data: The ECG signal
+    :param min_val: Minimum value for scaling (default 0)
+    :param max_val: Maximum value for scaling (default 1) 
+    :return: Normalized ECG signal scaled to [min_val, max_val]
     """
-    signal = (signal - min_val) / (max_val - min_val)
-    return signal
+    #data = data - np.mean(data)
+    #data = data / np.std(data)
+    #return data
+
+    data_min = np.min(data)
+    data_max = np.max(data)
+    data_norm = (data - data_min) / (data_max - data_min)
+    data_scaled = data_norm * (max_val - min_val) + min_val
+    return data_scaled

@@ -5,6 +5,9 @@ data/*
 # Ignore specific folders
 jobs/
 generalization/
+# Lightning logs in model checkpoints
+models/saved/*/lightning_logs/
+models/saved/*/*/lightning_logs/
 
 # Python
 __pycache__/
@@ -30,12 +33,15 @@ wheels/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Specific notebooks
+/notebooks/playground.ipynb
+notebooks/playground.ipynb
+**/playground.ipynb
 
 # VS Code
 .vscode/
-
-# PyCharm
-.idea/
 
 # Environment
 .env
