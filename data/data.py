@@ -1,12 +1,11 @@
 import os
-import subprocess
+
 import matplotlib.pyplot as plt
 import numpy as np
-import shutil
 import wfdb
 from scipy.ndimage import zoom
 from scipy.signal import savgol_filter, resample
-from preprocess import normalize, qsPeaks
+from data.preprocess import normalize, qsPeaks
 import torch
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
@@ -16,71 +15,21 @@ root_path = "/home/nahuel/ecg/generalization/"
 SEED = 42
 
 class PhysioNetDataset():
-	def __init__(self, dataset, path : str = False, download : bool = False, r_r: bool = False, return_sequences: bool = False, pre_process: bool = True):
+	def __init__(self, dataset, path : str = False, r_r: bool = False, return_sequences: bool = False, pre_process: bool = True):
 		self.dataset = dataset
 		self.path = path
 		self.r_r = r_r
-		self.download = download
 		self.lead = -1
 		self.num_classes = -1
 		self.class_counts = -1
 		self.return_sequences = return_sequences
-
-		if self.dataset == "MIT-BIH":
-			url = "https://physionet.org/files/mitdb/1.0.0/"
-			self.lead = 0 # Lead II
-		elif self.dataset == "INCART":
-			url = "https://physionet.org/files/incartdb/1.0.0/"
-			self.lead = 0 # Lead II
-		elif self.dataset == "NSR":
-			url = "https://physionet.org/files/nsrdb/1.0.0/"
-			self.lead = 0 # Lead II
-
-		if download:
-			self.download_dataset(url)
+		self.lead = 0
 
 		self.files = sorted(list(set([file.split('.')[0] for file in os.listdir(path) if file.endswith('.atr') or file.endswith('.hea')])))
 		self.X = []
 		self.y = []
 		if pre_process:
 			self.pre_process()
-
-	def download_dataset(self, url):
-		command = [
-			"wget",
-			"-r",  # Recursive download
-			"-N",  # Only download newer files
-			"-c",  # Continue interrupted downloads
-			"-np",  # Do not ascend to the parent directory
-			"--cut-dirs=5",  # Remove the first 5 directory levels
-			"-P", self.path,  # Destination folder
-			url  # Download URL
-		]
-
-		# Execute the wget command
-		try:
-			subprocess.run(command, check=True)
-			print("Download completed successfully.")
-		except subprocess.CalledProcessError as e:
-			print(f"An error occurred during download: {e}")
-		
-		# Move the files to the root directory and remove unnecessary subfolders
-		physionet_folder = os.path.join(self.path, "physionet.org")
-		if os.path.exists(physionet_folder):
-			for file_name in os.listdir(physionet_folder):
-				shutil.move(os.path.join(physionet_folder, file_name), self.path)
-			# Remove the intermediate folder
-			shutil.rmtree(os.path.join(self.path, "physionet.org"))
-			# Remove the specific record 102-0.atr
-			record_to_remove = os.path.join(self.path, "102-0.atr")
-			if os.path.exists(record_to_remove):
-				os.remove(record_to_remove)
-				print("Record 102-0.atr removed.")
-			else:
-				print("Record 102-0.atr not found.")
-			print("Done.")
-		else:
-			print("Couldn't remove 'physionet.org' intermediate folder.")
 
 	def pre_process(self, target_fs=360, max_time=10, classes= ['F', 'N', 'S', 'V']):
 		beat_len = 280 # pre-fixed length of segments
@@ -559,7 +508,7 @@ def load_data(dataset, batch_size=32):
     return train_dataloader, val_dataloader, test_dataloader
 '''
 
-def load_data(dataset_name, max_time=10, classes= ['F', 'N', 'S', 'V'], batch_size=20, return_sequences=False):
+def load_data(dataset_name, max_time=10, classes= ['F', 'N', 'S', 'V'], batch_size=20, return_sequences=False, return_npy=False):
     
 	dataset = PhysioNetDataset(dataset_name, path=root_path+'data/'+dataset_name)
 	data = dataset.X
@@ -597,6 +546,13 @@ def load_data(dataset_name, max_time=10, classes= ['F', 'N', 'S', 'V'], batch_si
 	# dividir en train/test
 	X_train, X_test, y_train, y_test = train_test_split(inputs, labels, test_size=0.2, random_state=42)
 
+	if return_npy:
+		X_train = np.reshape(X_train, [-1, X_train.shape[2]]) # shape [muestras, seq_len]
+		y_train = np.reshape(y_train, [-1]) # shape [muestras]
+		X_test = np.reshape(X_test, [-1, X_test.shape[2]]) # shape [muestras, seq_len]
+		y_test = np.reshape(y_test, [-1]) # shape [muestras]
+		return X_train, y_train, X_test, y_test
+
 	# SMOTE
 	from imblearn.over_sampling import SMOTE
 	X_train = np.reshape(X_train,[X_train.shape[0]*X_train.shape[1],-1])
@@ -626,9 +582,9 @@ def load_data(dataset_name, max_time=10, classes= ['F', 'N', 'S', 'V'], batch_si
 
 	# Create dataloaders
 	train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [0.9, 0.1], generator=torch.Generator().manual_seed(SEED))
-	train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, generator=torch.Generator().manual_seed(SEED))
-	val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED))
-	test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED))
+	train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, generator=torch.Generator().manual_seed(SEED), num_workers=12)
+	val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED), num_workers=12)
+	test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, generator=torch.Generator().manual_seed(SEED), num_workers=12)
 
 	return train_dataloader, val_dataloader, test_dataloader
 

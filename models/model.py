@@ -1,7 +1,6 @@
-import torch
 from lightning import LightningModule
-import cnn
-from seq2seq import ConvLSTMSeq2Seq
+from models import cnn
+from models.seq2seq import ConvLSTMSeq2Seq
 
 class ECGModel(LightningModule):
     def __init__(self, model, class_weights=None, lr=1e-3):

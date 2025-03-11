@@ -4,8 +4,9 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 class CNN(nn.Module):
-    def __init__(self, n_classes=5):
+    def __init__(self, n_classes=5, class_weights=None):
         super(CNN, self).__init__()
+        self.class_weights = class_weights
         
         # Block 1
         self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=5, padding=0)  # "valid" padding in Keras -> padding=0
@@ -39,7 +40,7 @@ class CNN(nn.Module):
         # you typically do NOT apply softmax in the forward pass. We'll show both ways.
         #self.softmax = nn.Softmax(dim=1)
 
-    def forward(self, x):
+    def forward(self, x, _):
         """
         x shape should be (batch_size, 1, 187) in PyTorch 
         since it's (batch, channels, length).
@@ -95,16 +96,12 @@ class CNN(nn.Module):
         }
         return [optimizer], [scheduler]
     
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        output = self(x, y)
+    def training_step(self, logits, y):
         if self.class_weights is not None:
-            loss = torch.nn.functional.cross_entropy(output, y, weight=self.class_weights)
+            loss = torch.nn.functional.cross_entropy(logits, y, weight=self.class_weights)
         else:
-            loss = torch.nn.functional.cross_entropy(output, y)
-        acc = (output.argmax(dim=1) == y).float().mean()
-        self.log('train_loss', loss, on_step=False, on_epoch=True)
-        self.log('train_acc', acc, on_step=False, on_epoch=True)
+            loss = torch.nn.functional.cross_entropy(logits, y)
+        acc = (logits.argmax(dim=1) == y).float().mean()
         return loss, acc
     
     def evaluate(self, test_dataloader, device):
@@ -117,7 +114,7 @@ class CNN(nn.Module):
         with torch.no_grad():
             for inputs, targets in test_dataloader:
                 inputs, targets = inputs.to(device), targets.to(device)
-                outputs = self(inputs)
+                outputs = self(inputs, targets)
                 preds = torch.argmax(outputs, dim=1)
                 all_preds.append(preds.cpu().numpy())
                 all_targets.append(targets.cpu().numpy())
